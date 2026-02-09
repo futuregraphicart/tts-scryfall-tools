@@ -1,0 +1,41 @@
+function onLoad()
+    self.createButton({
+        label="Upgrader",
+        click_function="pickKeyword",
+        function_owner=self,
+        position={0,1,0.7},
+        width=400,
+        height=100,
+        rotation={0,180,0},
+        font_size=75,
+        tooltip="Click to get a random MTG keyword!"
+    })
+end
+
+function pickKeyword(_, playerColor)
+    local keywords = {
+        "Fight", "Mill", "Sacrifice", "Scry", "Tap/Untap",
+        "Deathtouch", "Defender", "Double strike", "Enchant", "Equip",
+        "First strike", "Flash", "Flying", "Haste", "Hexproof",
+        "Indestructible", "Lifelink", "Menace", "Protection",
+        "Prowess", "Reach", "Trample", "Vigilance"
+    }
+
+    local keyword = keywords[math.random(#keywords)]
+
+    -- Set description on the object
+    self.setDescription(keyword)
+
+    -- Get player info safely
+    local player = Player[playerColor]
+    local playerName = player.steam_name or playerColor
+    local playerChatColor = player.color or {1,1,1}
+
+    -- Broadcast to all players in the clicker's color
+    printToAll(
+        "🧙 " .. playerName .. " rolled: " .. keyword,
+        playerChatColor
+    )
+end
+
+-- script created by Budster024
