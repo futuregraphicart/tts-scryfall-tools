@@ -1,0 +1,703 @@
+---------------------------------------------------------------------------
+-- MTG Card Sorter (Object Script)
+-- 3 buttons (VERTICAL): Sort Color / Sort Type / Sort CMC
+-- Self-contained, no zones. Piles in ONE LINE.
+-- Binds to a Deck/Card when you click a button and keeps sorting even if the
+-- deck slides away. Includes "last card" recovery when a Deck collapses to Card.
+--
+-- Color piles (9):  W U B R G Colorless Multicolor Land Unsort
+-- Type  piles (9):  Creature Instant Sorcery Artifact Enchantment Planeswalker Land Battle Other
+-- CMC   piles (9):  0 1 2 3 4 5 6+ Land Unsort
+---------------------------------------------------------------------------
+
+-- =========================
+-- Config
+-- =========================
+local SCRY_BASE     = "https://api.scryfall.com"
+local MIN_DELAY     = 0.30
+local MAX_RETRY     = 3
+local LOCK_TIMEOUT  = 240
+
+-- One-line pile layout
+local PILE_Y_LIFT    = 1.2
+local PILE_SPREAD_X  = 2.2
+local PILE_LINE_Z    = -4.0
+local STAGE_LIFT_Y   = 2.4
+
+-- Touch bind window (collision can be flaky; we also have nearest fallback)
+local TOUCH_GRACE_SECONDS = 6.0
+local NEAREST_BIND_RADIUS = 6.0
+
+-- Last-card recovery scan radius (around last known deck position)
+local LAST_CARD_SEARCH_RADIUS = 3.0
+
+-- Debug prints
+local DEBUG_PRINT = false
+
+-- =========================
+-- Modes
+-- =========================
+local MODE = { COLOR="COLOR", TYPE="TYPE", CMC="CMC" }
+
+-- =========================
+-- Persistent State
+-- =========================
+sorterState = sorterState or {
+  isSorting  = false,
+  cacheColor = {},   -- normalizedName -> key
+  cacheType  = {},   -- normalizedName -> key
+  cacheCmc   = {},   -- normalizedName -> key
+}
+
+-- =========================
+-- Runtime State
+-- =========================
+local _unlockTimer     = nil
+local _pileIndex       = {}
+
+local _lastTouchedGuid = nil
+local _touchedAt       = 0
+
+local _activeGuid      = nil
+local _activeTag       = nil
+local _activeLastPos   = nil
+local _didLastCardScan = false
+
+local _activeMode      = nil
+local _activeButtonIdx = nil
+
+-- =========================
+-- Keys + pile orders (9 each)
+-- =========================
+-- Color keys
+local Kc = { W="W", U="U", B="B", R="R", G="G", C="C", M="M", L="L", X="X" }
+local ORDER_COLOR = { Kc.W, Kc.U, Kc.B, Kc.R, Kc.G, Kc.C, Kc.M, Kc.L, Kc.X }
+
+-- Type keys
+local Kt = { CRE="CRE", INS="INS", SOR="SOR", ART="ART", ENC="ENC", PWL="PWL", LND="LND", BAT="BAT", OTH="OTH" }
+local ORDER_TYPE  = { Kt.CRE, Kt.INS, Kt.SOR, Kt.ART, Kt.ENC, Kt.PWL, Kt.LND, Kt.BAT, Kt.OTH }
+
+-- CMC keys
+local Km = { N0="0", N1="1", N2="2", N3="3", N4="4", N5="5", N6P="6+", LND="LND", X="X" }
+local ORDER_CMC   = { Km.N0, Km.N1, Km.N2, Km.N3, Km.N4, Km.N5, Km.N6P, Km.LND, Km.X }
+
+local function getOrderForMode(mode)
+  if mode == MODE.COLOR then return ORDER_COLOR end
+  if mode == MODE.TYPE  then return ORDER_TYPE end
+  return ORDER_CMC
+end
+
+-- =========================
+-- Utilities
+-- =========================
+local function trim(s) return (s or ""):gsub("^%s+",""):gsub("%s+$","") end
+
+local function normName(s)
+  s = trim(s):lower()
+  s = s:gsub("’","'"):gsub("“",'"'):gsub("”",'"'):gsub("%s+"," ")
+  return s
+end
+
+local function urlEncode(str)
+  if not str then return "" end
+  str = tostring(str):gsub("\n","\r\n")
+  str = str:gsub("([^%w %-%_%.%~])", function(c)
+    return string.format("%%%02X", string.byte(c))
+  end)
+  return str:gsub(" ", "%%20")
+end
+
+local function stopTimeout()
+  if _unlockTimer then
+    Wait.stop(_unlockTimer)
+    _unlockTimer = nil
+  end
+end
+
+local function setButtonLabel(idx, text)
+  pcall(function()
+    self.editButton({ index = idx, label = text or "" })
+  end)
+end
+
+local function resetButtonLabels()
+  setButtonLabel(0, "Sort Color")
+  setButtonLabel(1, "Sort Type")
+  setButtonLabel(2, "Sort CMC")
+end
+
+local function safeUnlock(reason)
+  sorterState.isSorting = false
+  _pileIndex = {}
+  _activeGuid = nil
+  _activeTag = nil
+  _activeLastPos = nil
+  _didLastCardScan = false
+  _activeMode = nil
+  _activeButtonIdx = nil
+  stopTimeout()
+  resetButtonLabels()
+  if reason then print("[Sorter] " .. reason) end
+end
+
+local function startLockTimeout()
+  stopTimeout()
+  _unlockTimer = Wait.time(function()
+    safeUnlock("Safety timeout reached; unlocked.")
+  end, LOCK_TIMEOUT)
+end
+
+-- =========================
+-- Piles (one line, dynamic order by mode)
+-- =========================
+local function pileLocalOffsetsForMode(mode)
+  local order = getOrderForMode(mode)
+  local n = #order
+  local startX = -((n - 1) * PILE_SPREAD_X) / 2
+  local map = {}
+  for i, k in ipairs(order) do
+    map[k] = { x = startX + (i - 1) * PILE_SPREAD_X, y = PILE_Y_LIFT, z = PILE_LINE_Z }
+  end
+  return map
+end
+
+local function sorterYawRot()
+  local r = self.getRotation()
+  return Vector(0, r.y, 0)
+end
+
+local function pileWorldPos(mode, key)
+  local offsets = pileLocalOffsetsForMode(mode)
+  local o = offsets[key] or offsets[getOrderForMode(mode)[#getOrderForMode(mode)]]
+  return self.positionToWorld(Vector(o.x, o.y, o.z))
+end
+
+local function nextStackOffset(key)
+  _pileIndex[key] = (_pileIndex[key] or 0) + 1
+  local n = _pileIndex[key]
+  local dx = ((n % 3) - 2) * 0.02
+  local dz = (((math.floor(n / 3)) % 3) - 2) * 0.02
+  return Vector(dx, 0.02, dz)
+end
+
+local function settleObject(obj)
+  pcall(function()
+    obj.setVelocity(Vector(0, 0, 0))
+    obj.setAngularVelocity(Vector(0, 0, 0))
+  end)
+end
+
+local function moveToPile(card, mode, key)
+  if not card then return end
+  local dest = pileWorldPos(mode, key) + nextStackOffset(key)
+  local rot = sorterYawRot()
+  pcall(function()
+    card.setRotationSmooth(rot, false, true)
+    card.setPositionSmooth(dest, false, true)
+  end)
+  Wait.time(function()
+    if card then settleObject(card) end
+  end, 0.15)
+end
+
+-- =========================
+-- Touch tracking (Deck OR Card) for initial bind
+-- =========================
+local function considerTouch(obj)
+  if not obj then return end
+  if obj.tag ~= "Deck" and obj.tag ~= "Card" then return end
+  _lastTouchedGuid = obj.getGUID()
+  _touchedAt = Time.time
+end
+
+function onCollisionEnter(info)
+  if info and info.collision_object then considerTouch(info.collision_object) end
+end
+
+function onCollisionStay(info)
+  if info and info.collision_object then considerTouch(info.collision_object) end
+end
+
+local function getRecentTouched()
+  if not _lastTouchedGuid then return nil end
+  if (Time.time - (_touchedAt or 0)) > TOUCH_GRACE_SECONDS then return nil end
+  local obj = getObjectFromGUID(_lastTouchedGuid)
+  if not obj then return nil end
+  if obj.tag ~= "Deck" and obj.tag ~= "Card" then return nil end
+  return obj
+end
+
+local function findNearestDeckOrCard(radius)
+  local origin = self.getPosition()
+  local best, bestD = nil, radius + 0.001
+
+  for _, o in ipairs(getAllObjects()) do
+    if o and (o.tag == "Deck" or o.tag == "Card") then
+      local ok, p = pcall(function() return o.getPosition() end)
+      if ok and p then
+        local d = (p - origin):magnitude()
+        if d <= bestD then
+          best = o
+          bestD = d
+        end
+      end
+    end
+  end
+
+  return best
+end
+
+local function getActiveObj()
+  if not _activeGuid then return nil end
+  local obj = getObjectFromGUID(_activeGuid)
+  if not obj then return nil end
+  if obj.tag ~= "Deck" and obj.tag ~= "Card" then return nil end
+  return obj
+end
+
+-- =========================
+-- Name sanitizing
+-- =========================
+local function sanitizeCardName(raw)
+  raw = trim(raw or "")
+  if raw == "" then return "" end
+  raw = raw:match("([^\n\r]+)") or raw
+  raw = trim(raw)
+  raw = raw:gsub("^%s*%d+%s*[xX]%s*", "")
+  raw = raw:gsub("^%s*[xX]%s*%d+%s*", "")
+  raw = trim(raw)
+
+  raw = raw:gsub("%b()", function(b)
+    local inside = b:sub(2, -2)
+    if inside:match("^%s*[%w%d][%w%d][%w%d]?[%w%d]?%s*$") then return "" end
+    if inside:match("^%s*%d+%s*$") then return "" end
+    return b
+  end)
+  raw = raw:gsub("%b[]", function(b)
+    local inside = b:sub(2, -2)
+    if inside:match("^%s*[%w%d][%w%d][%w%d]?[%w%d]?[%w%d]?%s*$") then return "" end
+    if inside:match("^%s*#?%d+%s*$") then return "" end
+    return b
+  end)
+
+  raw = trim(raw)
+  raw = raw:gsub("%s+—%s+.*$", "")
+  raw = raw:gsub("%s+%-%s+.*$", "")
+  return trim(raw)
+end
+
+local function bestCardName(obj)
+  if not obj then return "" end
+  local nm = trim(obj.getName() or "")
+  if nm == "" then
+    local desc = trim(obj.getDescription() or "")
+    if desc ~= "" then nm = trim((desc:match("([^\n\r]+)") or "")) end
+  end
+  return sanitizeCardName(nm)
+end
+
+-- =========================
+-- Scryfall fetch
+-- =========================
+local function scryFetch(cardName, attempt, cb)
+  attempt = attempt or 1
+  local url = SCRY_BASE .. "/cards/named?fuzzy=" .. urlEncode(cardName)
+
+  WebRequest.custom(url, "GET", true, "", {
+    ["User-Agent"] = "TabletopSimulator/MTGCardSorter",
+    ["Accept"] = "application/json;q=0.9,*/*;q=0.8"
+  }, function(req)
+    if not req then cb(false, nil, 0); return end
+
+    if req.response_code == 200 then
+      local ok, data = pcall(function() return JSON.decode(req.text or "") end)
+      if ok and data then
+        cb(true, data, 200)
+      else
+        cb(false, nil, 200)
+      end
+      return
+    end
+
+    if (req.response_code == 429 or req.response_code == 502 or req.response_code == 503) and attempt < MAX_RETRY then
+      local backoff = (0.8 * attempt) + math.random() * 0.4
+      Wait.time(function()
+        scryFetch(cardName, attempt + 1, cb)
+      end, backoff)
+      return
+    end
+
+    cb(false, nil, req.response_code)
+  end)
+end
+
+-- =========================
+-- Classifiers
+-- =========================
+local function isLandFromData(data)
+  local function hasLand(tl) return tl and tl:find("Land") ~= nil end
+  if hasLand(data.type_line or "") then return true end
+  if data.card_faces and type(data.card_faces) == "table" then
+    for _, face in ipairs(data.card_faces) do
+      if hasLand((face and face.type_line) or "") then return true end
+    end
+  end
+  return false
+end
+
+local function unionFaceColors(data)
+  local set = {}
+  if data.card_faces and type(data.card_faces) == "table" then
+    for _, face in ipairs(data.card_faces) do
+      local cols = face and face.colors
+      if cols and type(cols) == "table" then
+        for _, c in ipairs(cols) do
+          if c == "W" or c == "U" or c == "B" or c == "R" or c == "G" then
+            set[c] = true
+          end
+        end
+      end
+    end
+  end
+  local out = {}
+  for _, c in ipairs({ "W", "U", "B", "R", "G" }) do
+    if set[c] then out[#out + 1] = c end
+  end
+  return out
+end
+
+local function decideColorKey(data)
+  if isLandFromData(data) then return Kc.L end
+
+  local colors = data.colors
+  if not colors or type(colors) ~= "table" then colors = unionFaceColors(data) end
+  if (not colors or type(colors) ~= "table") and data.color_identity and type(data.color_identity) == "table" then
+    colors = data.color_identity
+  end
+  colors = colors or {}
+
+  local filtered, seen = {}, {}
+  for _, c in ipairs(colors) do
+    if (c == "W" or c == "U" or c == "B" or c == "R" or c == "G") and not seen[c] then
+      seen[c] = true
+      filtered[#filtered + 1] = c
+    end
+  end
+
+  if #filtered == 0 then return Kc.C end
+  if #filtered == 1 then
+    local c = filtered[1]
+    if c == "W" then return Kc.W end
+    if c == "U" then return Kc.U end
+    if c == "B" then return Kc.B end
+    if c == "R" then return Kc.R end
+    if c == "G" then return Kc.G end
+    return Kc.X
+  end
+  return Kc.M
+end
+
+local function decideTypeKey(data)
+  if isLandFromData(data) then return Kt.LND end
+  local tl = data.type_line or ""
+  if tl:find("Creature") then return Kt.CRE end
+  if tl:find("Instant") then return Kt.INS end
+  if tl:find("Sorcery") then return Kt.SOR end
+  if tl:find("Artifact") then return Kt.ART end
+  if tl:find("Enchantment") then return Kt.ENC end
+  if tl:find("Planeswalker") then return Kt.PWL end
+  if tl:find("Battle") then return Kt.BAT end
+  return Kt.OTH
+end
+
+local function getManaValue(data)
+  local mv = data.mana_value
+  if mv == nil then mv = data.cmc end
+  if type(mv) ~= "number" then mv = tonumber(mv) end
+  return mv
+end
+
+local function decideCmcKey(data)
+  if isLandFromData(data) then return Km.LND end
+
+  local mv = getManaValue(data)
+  if mv == nil then return Km.X end
+
+  local n = math.floor(mv + 0.0001)
+  if n <= 0 then return Km.N0 end
+  if n == 1 then return Km.N1 end
+  if n == 2 then return Km.N2 end
+  if n == 3 then return Km.N3 end
+  if n == 4 then return Km.N4 end
+  if n == 5 then return Km.N5 end
+  return Km.N6P
+end
+
+local function getCacheForMode(mode)
+  if mode == MODE.COLOR then return sorterState.cacheColor end
+  if mode == MODE.TYPE  then return sorterState.cacheType end
+  return sorterState.cacheCmc
+end
+
+local function decideKeyForMode(mode, data)
+  if mode == MODE.COLOR then return decideColorKey(data) end
+  if mode == MODE.TYPE  then return decideTypeKey(data) end
+  return decideCmcKey(data)
+end
+
+-- =========================
+-- Card classification + move (cached)
+-- =========================
+local function classifyAndMove(card, doneCb)
+  if not card then if doneCb then doneCb() end; return end
+
+  local raw = bestCardName(card)
+  local cache = getCacheForMode(_activeMode)
+
+  local failKey
+  if _activeMode == MODE.COLOR then failKey = Kc.X
+  elseif _activeMode == MODE.TYPE then failKey = Kt.OTH
+  else failKey = Km.X end
+
+  if raw == "" then
+    moveToPile(card, _activeMode, failKey)
+    if doneCb then doneCb() end
+    return
+  end
+
+  local nn = normName(raw)
+  local cachedKey = cache[nn]
+  if cachedKey then
+    if DEBUG_PRINT then print("[Sorter] " .. raw .. " -> " .. tostring(cachedKey) .. " (cache ".._activeMode..")") end
+    moveToPile(card, _activeMode, cachedKey)
+    if doneCb then doneCb() end
+    return
+  end
+
+  Wait.time(function()
+    scryFetch(raw, 1, function(ok, data, code)
+      local key = failKey
+      if ok and data then
+        key = decideKeyForMode(_activeMode, data) or failKey
+      else
+        if DEBUG_PRINT then print("[Sorter] Scryfail " .. tostring(code) .. " for '"..raw.."', using "..tostring(failKey)) end
+      end
+      cache[nn] = key
+      moveToPile(card, _activeMode, key)
+      if doneCb then doneCb() end
+    end)
+  end, MIN_DELAY)
+end
+
+-- =========================
+-- Last-card recovery (deck collapses into a card)
+-- =========================
+local function findNearbyLastCard()
+  if not _activeLastPos then return nil end
+  local objs = getAllObjects()
+  local best = nil
+  local bestD = LAST_CARD_SEARCH_RADIUS + 0.001
+  for _, o in ipairs(objs) do
+    if o and o.tag == "Card" then
+      local p = o.getPosition()
+      local d = (p - _activeLastPos):magnitude()
+      if d <= bestD then
+        best = o
+        bestD = d
+      end
+    end
+  end
+  return best
+end
+
+-- =========================
+-- Main loop
+-- =========================
+local function processNext()
+  if not sorterState.isSorting then safeUnlock("Stopped."); return end
+  startLockTimeout()
+
+  local src = getActiveObj()
+  if src then
+    _activeTag = src.tag
+    _activeLastPos = src.getPosition()
+  end
+
+  if not src and _activeTag == "Deck" and not _didLastCardScan then
+    _didLastCardScan = true
+    local last = findNearbyLastCard()
+    if last then
+      classifyAndMove(last, function()
+        Wait.time(function() safeUnlock("Sort complete.") end, 0.10)
+      end)
+      return
+    end
+  end
+
+  if not src then
+    safeUnlock("Bound source missing; stopping cleanly.")
+    return
+  end
+
+  if src.tag == "Card" then
+    classifyAndMove(src, function()
+      Wait.time(function() safeUnlock("Sorted single card.") end, 0.10)
+    end)
+    return
+  end
+
+  local qty = 0
+  pcall(function() qty = src.getQuantity() or 0 end)
+  if qty <= 0 then
+    safeUnlock("Sort complete.")
+    return
+  end
+
+  local stagePos = self.getPosition() + Vector(0, STAGE_LIFT_Y, 0)
+  local rot = sorterYawRot()
+
+  local ok = pcall(function()
+    src.takeObject({
+      position = stagePos,
+      rotation = rot,
+      smooth   = false,
+      callback_function = function(card)
+        if not sorterState.isSorting then return end
+        if not card then
+          Wait.time(processNext, 0.10)
+          return
+        end
+        classifyAndMove(card, function()
+          Wait.time(processNext, 0.10)
+        end)
+      end
+    })
+  end)
+
+  if not ok then
+    safeUnlock("takeObject failed; stopping cleanly.")
+  end
+end
+
+-- =========================
+-- Start sorting
+-- =========================
+local function startSort(mode, buttonIdx)
+  if sorterState.isSorting then
+    safeUnlock("Manually stopped.")
+    return
+  end
+
+  local touched = getRecentTouched()
+  if not touched then
+    touched = findNearestDeckOrCard(NEAREST_BIND_RADIUS)
+  end
+  if not touched then
+    print("[Sorter] Touch a Deck/Card to the sorter (or move one near it), then click a Sort button.")
+    return
+  end
+
+  _activeMode = mode
+  _activeButtonIdx = buttonIdx
+
+  _activeGuid = touched.getGUID()
+  _activeTag = touched.tag
+  _activeLastPos = touched.getPosition()
+  _didLastCardScan = false
+
+  sorterState.isSorting = true
+  _pileIndex = {}
+
+  resetButtonLabels()
+  setButtonLabel(buttonIdx, "Stop")
+  startLockTimeout()
+
+  processNext()
+end
+
+function onSortColor() startSort(MODE.COLOR, 0) end
+function onSortType()  startSort(MODE.TYPE,  1) end
+function onSortCmc()   startSort(MODE.CMC,   2) end
+
+-- =========================
+-- Save / Load
+-- =========================
+function onSave()
+  return JSON.encode(sorterState)
+end
+
+function onLoad(saved_data)
+  if saved_data and saved_data ~= "" then
+    local ok, t = pcall(function() return JSON.decode(saved_data) end)
+    if ok and type(t) == "table" then
+      sorterState = t
+      sorterState.cacheColor = sorterState.cacheColor or {}
+      sorterState.cacheType  = sorterState.cacheType  or {}
+      sorterState.cacheCmc   = sorterState.cacheCmc   or {}
+      sorterState.isSorting  = false
+    end
+  else
+    sorterState.cacheColor = sorterState.cacheColor or {}
+    sorterState.cacheType  = sorterState.cacheType  or {}
+    sorterState.cacheCmc   = sorterState.cacheCmc   or {}
+    sorterState.isSorting  = false
+  end
+
+  -- 3 solid-grey buttons stacked vertically (centered)
+  local btnCommon = {
+    function_owner = self,
+    rotation       = {0, 0, 0}, -- text orientation
+    width          = 1000,
+    height         = 300,
+    font_size      = 190,
+    color          = {0.45, 0.45, 0.45, 1.0},
+    font_color     = {0, 0, 0, 1},
+  }
+
+  self.createButton({
+    index          = 0,
+    label          = "Sort Color",
+    click_function = "onSortColor",
+    position       = {0, 0.25,  0.75},
+    tooltip        = "Sort into color piles using Scryfall.",
+    function_owner = btnCommon.function_owner,
+    rotation       = btnCommon.rotation,
+    width          = btnCommon.width,
+    height         = btnCommon.height,
+    font_size      = btnCommon.font_size,
+    color          = btnCommon.color,
+    font_color     = btnCommon.font_color,
+  })
+
+  self.createButton({
+    index          = 1,
+    label          = "Sort Type",
+    click_function = "onSortType",
+    position       = {0, 0.25,  0.00},
+    tooltip        = "Sort into type piles using Scryfall.",
+    function_owner = btnCommon.function_owner,
+    rotation       = btnCommon.rotation,
+    width          = btnCommon.width,
+    height         = btnCommon.height,
+    font_size      = btnCommon.font_size,
+    color          = btnCommon.color,
+    font_color     = btnCommon.font_color,
+  })
+
+  self.createButton({
+    index          = 2,
+    label          = "Sort CMC",
+    click_function = "onSortCmc",
+    position       = {0, 0.25, -0.75},
+    tooltip        = "Sort into mana value (CMC) piles using Scryfall.",
+    function_owner = btnCommon.function_owner,
+    rotation       = btnCommon.rotation,
+    width          = btnCommon.width,
+    height         = btnCommon.height,
+    font_size      = btnCommon.font_size,
+    color          = btnCommon.color,
+    font_color     = btnCommon.font_color,
+  })
+
+  safeUnlock()
+end
