@@ -1,0 +1,71 @@
+-- Global table to track processed objects
+processedObjects = {}
+
+-- Function to get the total converted mana cost (CMC) of a deck or card
+function calculateDeckCMC(deck)
+    if not deck or (deck.tag ~= "Deck" and deck.tag ~= "Card") then
+        printToAll("Error: No valid deck or card found.", {1, 1, 1}) -- White text
+        return
+    end
+
+    local totalCMC = 0
+
+    if deck.tag == "Deck" then
+        local deckData = deck.getData()
+        if deckData and deckData.ContainedObjects then
+            for _, card in ipairs(deckData.ContainedObjects) do
+                local cmc = extractCMCFromName(card.Nickname)
+                if cmc then
+                    totalCMC = totalCMC + cmc
+                end
+            end
+        end
+    elseif deck.tag == "Card" then -- Single card case
+        local cmc = extractCMCFromName(deck.getName())
+        if cmc then
+            totalCMC = totalCMC + cmc
+        end
+    end
+
+    printToAll("White total CMC: " .. tostring(totalCMC), {1, 1, 1}) -- White text
+end
+
+-- Function to extract CMC from the card name
+function extractCMCFromName(name)
+    if not name then return nil end
+    local cmc = name:match("%d+") -- Extracts the first number found in the name
+    return cmc and tonumber(cmc) or nil
+end
+
+-- Function triggered when an object collides with this scripted object
+function onCollisionEnter(info)
+    local obj = info.collision_object
+    if obj and (obj.tag == "Deck" or obj.tag == "Card") then
+        local objGUID = obj.getGUID()
+        if processedObjects[objGUID] then return end -- Skip if already processed
+
+        processedObjects[objGUID] = true -- Mark object as processed
+        checkDeckContents(obj)
+        calculateDeckCMC(obj)
+
+        -- Clear processed objects after a delay to allow future recalculations
+        Wait.time(function() processedObjects[objGUID] = nil end, 1)
+    end
+end
+
+-- Function to check deck contents safely
+function checkDeckContents(deck)
+    if not deck then return end
+
+    if deck.tag == "Deck" then
+        local deckContents = deck.getObjects()
+        if deckContents then
+            local totalCards = #deckContents
+            printToAll("Deck contains " .. totalCards .. " cards.", {1, 1, 1}) -- White text
+        else
+            printToAll("Deck has no readable contents.", {1, 1, 1}) -- White text
+        end
+    else
+        printToAll("Single card detected.", {1, 1, 1}) -- White text
+    end
+end
