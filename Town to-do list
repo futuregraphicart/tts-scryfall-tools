@@ -1,0 +1,268 @@
+---------------------------------------------------------------------------
+--Created by Budster024
+--
+--TOWN BOARD (Shared Notecard Logger)
+--
+-- HOW TO USE:
+--
+-- 1) ADD ITEMS VIA CHAT (ANYONE)
+--    • Type:
+--        !town <text>
+--        !town+ <text>
+--
+--    Each command adds a new line to a shared notecard.
+--    The line is prefixed with your player color.
+--
+-- 2) CLEAR ITEMS (OWNER ONLY)
+--    • The FIRST player color to trigger notecard creation becomes the OWNER.
+--    • Only the OWNER can clear entries using buttons:
+--        - Clear Top
+--        - Clear Bottom
+--
+-- 3) NOTECARD BEHAVIOR
+--    • A single shared notecard named "Town Board" is used.
+--    • It spawns once and is reused.
+--    • It spawns on the table, below the checker.
+--    • All players can read it.
+--
+---------------------------------------------------------------------------
+
+local TOWN_CMD_SET    = "!town "
+local TOWN_CMD_APPEND = "!town+ "
+
+local sharedNoteGuid = nil
+local ownerColor = nil  -- first color to create/claim the notecard
+
+local function startsWith(s, prefix)
+  return s:sub(1, #prefix) == prefix
+end
+
+local function trim(s)
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- Spawn BELOW the checker, on the table
+local function getSpawnPos()
+  local p = self.getPosition()
+  return {
+    x = p.x,
+    y = p.y + 0.25,  -- sit on table
+    z = p.z - 3.75   -- below / in front of checker
+  }
+end
+
+local function canClear(requestorColor)
+  if not ownerColor then return true end -- first clear attempt can claim if none set
+  return requestorColor == ownerColor
+end
+
+local function denyClear(requestorColor)
+  if ownerColor then
+    printToColor("Only " .. tostring(ownerColor) .. " can clear entries on the Town Board.", requestorColor, {1,1,1})
+  else
+    printToColor("Town Board owner not set yet. Try again.", requestorColor, {1,1,1})
+  end
+end
+
+local function ensureSharedNotecard(requestorColor, callback)
+  if sharedNoteGuid then
+    local obj = getObjectFromGUID(sharedNoteGuid)
+    if obj and obj.tag == "Notecard" then
+      -- if owner not recorded (e.g., after load), let first interaction claim
+      if not ownerColor then ownerColor = requestorColor end
+      callback(obj)
+      return
+    end
+    sharedNoteGuid = nil
+  end
+
+  -- Creating a NEW notecard: first requestor becomes owner (locked in)
+  if not ownerColor then ownerColor = requestorColor end
+
+  spawnObject({
+    type = "Notecard",
+    position = getSpawnPos(),
+    rotation = {0, 0, 0},
+    callback_function = function(card)
+      card.setName("Town Board")
+      card.setDescription("")
+      sharedNoteGuid = card.getGUID()
+      callback(card)
+    end
+  })
+end
+
+local function getLines(desc)
+  desc = desc or ""
+  if desc == "" then return {} end
+  local lines = {}
+  for line in desc:gmatch("([^\r\n]+)") do
+    table.insert(lines, line)
+  end
+  return lines
+end
+
+local function joinLines(lines)
+  if not lines or #lines == 0 then return "" end
+  return table.concat(lines, "\n")
+end
+
+local function formatLine(playerColor, text)
+  return string.format("%s: %s", playerColor, text)
+end
+
+-- Anyone can append -----------------------------------------------------
+
+local function appendLine(requestorColor, line)
+  ensureSharedNotecard(requestorColor, function(card)
+    local existing = card.getDescription() or ""
+    if existing ~= "" then
+      card.setDescription(existing .. "\n" .. line)
+    else
+      card.setDescription(line)
+    end
+    printToColor("Added to Town Board.", requestorColor, {1,1,1})
+  end)
+end
+
+-- Owner-only clear ------------------------------------------------------
+
+local function clearTopLineAndReturn(requestorColor, cb)
+  if not canClear(requestorColor) then
+    denyClear(requestorColor)
+    if cb then cb(nil) end
+    return
+  end
+
+  ensureSharedNotecard(requestorColor, function(card)
+    -- First successful clear sets owner if missing
+    if not ownerColor then ownerColor = requestorColor end
+
+    local desc = card.getDescription() or ""
+    local lines = getLines(desc)
+    if #lines == 0 then
+      if cb then cb(nil) end
+      return
+    end
+
+    local removedLine = lines[1]
+    table.remove(lines, 1)
+    card.setDescription(joinLines(lines))
+    if cb then cb(removedLine) end
+  end)
+end
+
+local function clearBottomLineAndReturn(requestorColor, cb)
+  if not canClear(requestorColor) then
+    denyClear(requestorColor)
+    if cb then cb(nil) end
+    return
+  end
+
+  ensureSharedNotecard(requestorColor, function(card)
+    -- First successful clear sets owner if missing
+    if not ownerColor then ownerColor = requestorColor end
+
+    local desc = card.getDescription() or ""
+    local lines = getLines(desc)
+    if #lines == 0 then
+      if cb then cb(nil) end
+      return
+    end
+
+    local removedLine = lines[#lines]
+    table.remove(lines, #lines)
+    card.setDescription(joinLines(lines))
+    if cb then cb(removedLine) end
+  end)
+end
+
+-- Buttons ---------------------------------------------------------------
+
+function clearTopButton(_, playerColor, _)
+  clearTopLineAndReturn(playerColor, function(removed)
+    if removed then
+      printToColor("Cleared (Top): " .. removed, playerColor, {1,1,1})
+    else
+      printToColor("Town Board is empty.", playerColor, {1,1,1})
+    end
+  end)
+end
+
+function clearBottomButton(_, playerColor, _)
+  clearBottomLineAndReturn(playerColor, function(removed)
+    if removed then
+      printToColor("Cleared (Bottom): " .. removed, playerColor, {1,1,1})
+    else
+      printToColor("Town Board is empty.", playerColor, {1,1,1})
+    end
+  end)
+end
+
+function onLoad(saved_data)
+  if saved_data and saved_data ~= "" then
+    local ok, data = pcall(function() return JSON.decode(saved_data) end)
+    if ok and type(data) == "table" then
+      sharedNoteGuid = data.sharedNoteGuid
+      ownerColor = data.ownerColor
+    end
+  end
+
+  -- Clear Top
+  self.createButton({
+    label          = "Clear Top",
+    click_function = "clearTopButton",
+    function_owner = self,
+    position       = {0, 0.3, 0.25},
+    rotation       = {0, 180, 0},
+    width          = 1200,
+    height         = 300,
+    font_size      = 190
+  })
+
+  -- Clear Bottom
+  self.createButton({
+    label          = "Clear Bottom",
+    click_function = "clearBottomButton",
+    function_owner = self,
+    position       = {0, 0.3, -0.25},
+    rotation       = {0, 180, 0},
+    width          = 1200,
+    height         = 300,
+    font_size      = 170
+  })
+end
+
+function onSave()
+  return JSON.encode({
+    sharedNoteGuid = sharedNoteGuid,
+    ownerColor = ownerColor
+  })
+end
+
+-- Chat hook ------------------------------------------------------------
+
+function onChat(message, player)
+  if not player or not player.color then return end
+  local color = player.color
+
+  if startsWith(message, TOWN_CMD_APPEND) then
+    local text = trim(message:sub(#TOWN_CMD_APPEND + 1))
+    if text ~= "" then
+      appendLine(color, formatLine(color, text))
+    else
+      printToColor("Usage: !town+ <text>", color, {1,1,1})
+    end
+    return false
+  end
+
+  if startsWith(message, TOWN_CMD_SET) then
+    local text = trim(message:sub(#TOWN_CMD_SET + 1))
+    if text ~= "" then
+      appendLine(color, formatLine(color, text))
+    else
+      printToColor("Usage: !town <text>", color, {1,1,1})
+    end
+    return false
+  end
+end
