@@ -720,3 +720,289 @@ end
 function helper_spawn(player, value, id)
   spawnCardForHelper()
 end
+
+
+
+
+<Panel id="rootPanel" rectAlignment="MiddleCenter" position="0 -600 -1" width="1000" height="980" color="none">
+  <VerticalLayout spacing="10" padding="12 12 12 12">
+
+    <Panel id="mainPanel" width="960" height="940" color="black">
+      <VerticalLayout spacing="10" padding="14 14 14 14">
+
+        <Text alignment="UpperLeft" fontSize="22" color="#FFFFFF"
+              text="Scryfall Cathedral Helper (Tag Builder)"
+              preferredHeight="32" />
+
+        <!-- COLORS -->
+        <VerticalLayout color="#404040" padding="12 12 12 12" spacing="10">
+          <Text alignment="MiddleCenter" fontSize="16" color="#FFFFFF"
+                text="Colors (optional)"
+                preferredHeight="22" />
+
+          <HorizontalLayout spacing="14">
+            <ToggleButton id="helper_White" type="color" text="White"
+              icon="ui_checkoff" onValueChanged="helper_toggleColor"
+              iconAlignment="Right" isOn="False"
+              colors="#FFFFFF|#FFFFFF|#FFFFFF|#606060" preferredHeight="40" preferredWidth="150"/>
+
+            <ToggleButton id="helper_Blue" type="color" text="Blue"
+              icon="ui_checkoff" onValueChanged="helper_toggleColor"
+              iconAlignment="Right" isOn="False"
+              colors="#0000FF|#0000FF|#0000FF|#606060" preferredHeight="40" preferredWidth="150"/>
+
+            <ToggleButton id="helper_Black" type="color" text="Black"
+              icon="ui_checkoff" onValueChanged="helper_toggleColor"
+              iconAlignment="Right" isOn="False"
+              colors="#000000|#000000|#000000|#606060" preferredHeight="40" preferredWidth="150"/>
+
+            <ToggleButton id="helper_Red" type="color" text="Red"
+              icon="ui_checkoff" onValueChanged="helper_toggleColor"
+              iconAlignment="Right" isOn="False"
+              colors="#FF0000|#FF0000|#FF0000|#606060" preferredHeight="40" preferredWidth="150"/>
+
+            <ToggleButton id="helper_Green" type="color" text="Green"
+              icon="ui_checkoff" onValueChanged="helper_toggleColor"
+              iconAlignment="Right" isOn="False"
+              colors="#008000|#008000|#008000|#606060" preferredHeight="40" preferredWidth="150"/>
+          </HorizontalLayout>
+        </VerticalLayout>
+
+        <!-- TAG BUILDER -->
+        <VerticalLayout color="#303030" padding="12 12 12 12" spacing="12">
+          <Text alignment="MiddleCenter" fontSize="16" color="#FFFFFF"
+                text="Tag Builder (toggle + values)"
+                preferredHeight="22" />
+
+          <!-- t: -->
+          <VerticalLayout spacing="6">
+            <HorizontalLayout spacing="12">
+              <ToggleButton id="tag_t_toggle" text="t:"
+                icon="ui_checkoff" onValueChanged="tag_toggle"
+                iconAlignment="Right" isOn="False"
+                preferredHeight="36" preferredWidth="130"/>
+
+              <InputField id="tag_t_text1" onEndEdit="tag_textChanged"
+                preferredHeight="70" preferredWidth="350"
+                color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+
+              <InputField id="tag_t_text2" onEndEdit="tag_textChanged"
+                preferredHeight="70" preferredWidth="350"
+                color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+            </HorizontalLayout>
+
+            <Text fontSize="13" color="#CFCFCF"
+              text="Type line filter. Examples: Creature, Dragon, Artifact, Legendary."
+              preferredHeight="20"/>
+          </VerticalLayout>
+
+          <!-- kw: -->
+          <VerticalLayout spacing="6">
+            <HorizontalLayout spacing="12">
+              <ToggleButton id="tag_kw_toggle" text="kw:"
+                icon="ui_checkoff" onValueChanged="tag_toggle"
+                iconAlignment="Right" isOn="False"
+                preferredHeight="36" preferredWidth="130"/>
+
+              <InputField id="tag_kw_text1" onEndEdit="tag_textChanged"
+                preferredHeight="70" preferredWidth="350"
+                color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+
+              <InputField id="tag_kw_text2" onEndEdit="tag_textChanged"
+                preferredHeight="70" preferredWidth="350"
+                color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+            </HorizontalLayout>
+
+            <Text fontSize="13" color="#CFCFCF"
+              text="Keyword ability. Examples: flying, trample, ward, haste."
+              preferredHeight="20"/>
+          </VerticalLayout>
+
+          <!-- o: -->
+          <VerticalLayout spacing="6">
+            <HorizontalLayout spacing="12">
+              <ToggleButton id="tag_o_toggle" text="o:"
+                icon="ui_checkoff" onValueChanged="tag_toggle"
+                iconAlignment="Right" isOn="False"
+                preferredHeight="36" preferredWidth="130"/>
+
+              <InputField id="tag_o_text" onEndEdit="tag_textChanged"
+                preferredHeight="70" preferredWidth="720"
+                color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+            </HorizontalLayout>
+
+            <Text fontSize="13" color="#CFCFCF"
+              text="Oracle rules text contains this phrase."
+              preferredHeight="20"/>
+          </VerticalLayout>
+
+          <!-- otag: -->
+          <VerticalLayout spacing="6">
+            <HorizontalLayout spacing="12">
+              <ToggleButton id="tag_otag_toggle" text="otag:"
+                icon="ui_checkoff" onValueChanged="tag_toggle"
+                iconAlignment="Right" isOn="False"
+                preferredHeight="36" preferredWidth="130"/>
+
+              <InputField id="tag_otag_text" onEndEdit="tag_textChanged"
+                preferredHeight="70" preferredWidth="720"
+                color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+            </HorizontalLayout>
+
+            <Text fontSize="13" color="#CFCFCF"
+              text="Scryfall oracle tag. Examples: removal, ramp, draw."
+              preferredHeight="20"/>
+          </VerticalLayout>
+
+          <!-- is: -->
+          <VerticalLayout spacing="6">
+            <HorizontalLayout spacing="12">
+              <ToggleButton id="tag_is_toggle" text="is:"
+                icon="ui_checkoff" onValueChanged="tag_toggle"
+                iconAlignment="Right" isOn="False"
+                preferredHeight="36" preferredWidth="130"/>
+
+              <InputField id="tag_is_text" onEndEdit="tag_textChanged"
+                preferredHeight="70" preferredWidth="720"
+                color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+            </HorizontalLayout>
+
+            <Text fontSize="13" color="#CFCFCF"
+              text="Special property. Examples: commander, legendary, modal_dfc."
+              preferredHeight="20"/>
+          </VerticalLayout>
+
+          <!-- set: -->
+          <VerticalLayout spacing="6">
+            <HorizontalLayout spacing="12">
+              <ToggleButton id="tag_set_toggle" text="set:"
+                icon="ui_checkoff" onValueChanged="tag_toggle"
+                iconAlignment="Right" isOn="False"
+                preferredHeight="36" preferredWidth="130"/>
+
+              <InputField id="tag_set_text" onEndEdit="tag_textChanged"
+                preferredHeight="70" preferredWidth="720"
+                color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+            </HorizontalLayout>
+
+            <Text id="setStatus" fontSize="14" color="#CFCFCF"
+              text=""
+              preferredHeight="22"/>
+
+            <Text fontSize="13" color="#CFCFCF"
+              text="MTG set code. Example: neo, khm, mh2. Validator checks /sets/&lt;code&gt;."
+              preferredHeight="20"/>
+          </VerticalLayout>
+
+          <!-- r / cmc / pow / tou -->
+          <HorizontalLayout spacing="14">
+
+            <VerticalLayout spacing="6">
+              <HorizontalLayout spacing="10">
+                <ToggleButton id="tag_r_toggle" text="r:"
+                  icon="ui_checkoff" onValueChanged="tag_toggle"
+                  iconAlignment="Right" isOn="False"
+                  preferredHeight="36" preferredWidth="130"/>
+
+                <InputField id="tag_r_text" onEndEdit="tag_textChanged"
+                  preferredHeight="70" preferredWidth="130"
+                  color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+              </HorizontalLayout>
+              <Text fontSize="13" color="#CFCFCF" text="Rarity: c / u / r / m." preferredHeight="20"/>
+            </VerticalLayout>
+
+            <VerticalLayout spacing="6">
+              <HorizontalLayout spacing="10">
+                <ToggleButton id="tag_cmc_toggle" text="cmc"
+                  icon="ui_checkoff" onValueChanged="tag_toggle"
+                  iconAlignment="Right" isOn="False"
+                  preferredHeight="36" preferredWidth="130"/>
+
+                <InputField id="tag_cmc_text" onEndEdit="tag_textChanged"
+                  preferredHeight="70" preferredWidth="130"
+                  color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+              </HorizontalLayout>
+              <Text fontSize="13" color="#CFCFCF" text="Mana value. Use &gt;= &amp; &lt;= &amp; = etc." preferredHeight="20"/>
+            </VerticalLayout>
+
+            <VerticalLayout spacing="6">
+              <HorizontalLayout spacing="10">
+                <ToggleButton id="tag_pow_toggle" text="pow"
+                  icon="ui_checkoff" onValueChanged="tag_toggle"
+                  iconAlignment="Right" isOn="False"
+                  preferredHeight="36" preferredWidth="130"/>
+
+                <InputField id="tag_pow_text" onEndEdit="tag_textChanged"
+                  preferredHeight="70" preferredWidth="130"
+                  color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+              </HorizontalLayout>
+              <Text fontSize="13" color="#CFCFCF" text="Power filter. Use &gt;= &amp; &lt;= &amp; = etc." preferredHeight="20"/>
+            </VerticalLayout>
+
+            <VerticalLayout spacing="6">
+              <HorizontalLayout spacing="10">
+                <ToggleButton id="tag_tou_toggle" text="tou"
+                  icon="ui_checkoff" onValueChanged="tag_toggle"
+                  iconAlignment="Right" isOn="False"
+                  preferredHeight="36" preferredWidth="130"/>
+
+                <InputField id="tag_tou_text" onEndEdit="tag_textChanged"
+                  preferredHeight="70" preferredWidth="130"
+                  color="#FFFFFF" textColor="#000000" caretColor="#000000"/>
+              </HorizontalLayout>
+              <Text fontSize="13" color="#CFCFCF" text="Toughness filter. Use &gt;= &amp; &lt;= &amp; = etc." preferredHeight="20"/>
+            </VerticalLayout>
+
+          </HorizontalLayout>
+
+          <!-- PREVIEW -->
+          <VerticalLayout spacing="6" padding="10 0 0 0">
+            <Text fontSize="13" color="#CFCFCF" text="Query Preview:" preferredHeight="20"/>
+
+            <Text id="queryPreview" fontSize="16" color="#FFFFFF"
+                  text="(query will appear here)"
+                  preferredHeight="110" />
+
+            <Text id="queryPreviewCmd" fontSize="14" color="#CFCFCF"
+                  text="(scryfall command will appear here)"
+                  preferredHeight="165" />
+          </VerticalLayout>
+
+        </VerticalLayout>
+
+        <Button text="Reset Helper" onClick="reset_helper" preferredHeight="46" />
+
+        <!-- QUANTITY -->
+        <VerticalLayout color="#404040" padding="12 12 12 12" spacing="10">
+          <Text id="qtyLabel" fontSize="16" color="#FFFFFF"
+                text="Number of cards: 14" preferredHeight="24" />
+
+          <HorizontalLayout spacing="8">
+            <ToggleButton id="qty_1"  text="1"  icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_2"  text="2"  icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_3"  text="3"  icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_4"  text="4"  icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_5"  text="5"  icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_6"  text="6"  icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_7"  text="7"  icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_8"  text="8"  icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+          </HorizontalLayout>
+
+          <HorizontalLayout spacing="8">
+            <ToggleButton id="qty_9"  text="9"  icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_10" text="10" icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_11" text="11" icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_12" text="12" icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_13" text="13" icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_14" text="14" icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+            <ToggleButton id="qty_15" text="15" icon="ui_checkoff" onValueChanged="qty_toggle" preferredHeight="40"/>
+          </HorizontalLayout>
+        </VerticalLayout>
+
+        <Button text="Spawn Cards" onClick="helper_spawn" preferredHeight="50" />
+
+      </VerticalLayout>
+    </Panel>
+
+  </VerticalLayout>
+</Panel>
