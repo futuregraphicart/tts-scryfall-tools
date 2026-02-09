@@ -1,0 +1,722 @@
+--Scryfall Helper (Cathedral Tag Builder v2 + Dual Query Preview)
+--Script created by Budster024
+--Jan 2026
+--Scryfall Patcher 1.0
+--
+-- Updated:
+-- ✔ DFC support using States (right-click -> States)
+-- ✔ normal/small ONLY (no large/png)
+-- ✔ keeps your query builder + preview + set validation + cooldown/safety
+
+---------------------------------------------------
+-- Global State
+---------------------------------------------------
+helperState = {
+  selectedColors = {},  -- UI ids -> bool
+  cardQuantity = 14,
+  isSpawning = false,
+
+  tags = {
+    -- Two-field tags
+    t  = { enabled = false, text1 = "", text2 = "" },  -- t:
+    kw = { enabled = false, text1 = "", text2 = "" },  -- kw:
+
+    -- Single-field tags
+    o    = { enabled = false, text = "" },             -- o:
+    otag = { enabled = false, text = "" },             -- otag:
+    ["is"] = { enabled = false, text = "" },           -- is:
+
+    -- set code filter
+    set  = { enabled = false, text = "" },             -- set:
+
+    r    = { enabled = false, text = "" },             -- r:
+
+    -- Numeric filters
+    cmc  = { enabled = false, text = "" },             -- cmc
+    pow  = { enabled = false, text = "" },             -- pow
+    tou  = { enabled = false, text = "" },             -- tou
+  }
+}
+
+---------------------------------------------------
+-- Scryfall + Back URL
+---------------------------------------------------
+local SCRY_BASE = "https://api.scryfall.com"
+backURL = "https://steamusercontent-a.akamaihd.net/ugc/1647720103762682461/35EF6E87970E2A5D6581E7D96A99F8A575B7A15F/"
+
+local jsonErrorPrinted = false
+
+---------------------------------------------------
+-- Throttle / retries
+---------------------------------------------------
+local MIN_DELAY = 0.35
+local MAX_RETRY = 3
+local _nextTime = 0
+
+---------------------------------------------------
+-- Safeguards
+---------------------------------------------------
+local COOLDOWN_SECONDS       = 10
+local SAFETY_TIMEOUT_SECONDS = 60
+local _cooldownUntil         = 0
+local _safetyTimerActive     = false
+
+---------------------------------------------------
+-- DFC behavior
+---------------------------------------------------
+local USE_STATES_FOR_DFC = true -- true = attach State 2 for face 2 on DFC cards
+
+---------------------------------------------------
+-- Headers
+---------------------------------------------------
+local function scryHeaders()
+  return {
+    ["User-Agent"] = "TTS-UI-ScryfallImporter/1.0 (Tabletop Simulator)",
+    ["Accept"] = "application/json;q=0.9,*/*;q=0.8",
+  }
+end
+
+---------------------------------------------------
+-- Timing helpers
+---------------------------------------------------
+local function schedule(fn, delay)
+  Wait.time(fn, math.max(0, delay or 0))
+end
+
+local function startSafetyTimer()
+  if _safetyTimerActive then return end
+  _safetyTimerActive = true
+  schedule(function()
+    _safetyTimerActive = false
+    if helperState and helperState.isSpawning then
+      helperState.isSpawning = false
+    end
+  end, SAFETY_TIMEOUT_SECONDS)
+end
+
+---------------------------------------------------
+-- queueRequest(url, cb(ok, body), attempt)
+---------------------------------------------------
+local function queueRequest(url, cb, attempt)
+  attempt = attempt or 1
+
+  local now = os.clock()
+  _nextTime = math.max(_nextTime, now) + MIN_DELAY
+  local delay = math.max(0, _nextTime - now)
+
+  schedule(function()
+    WebRequest.custom(url, "GET", true, nil, scryHeaders(), function(req)
+      if req.is_error then
+        if attempt < MAX_RETRY then
+          schedule(function() queueRequest(url, cb, attempt + 1) end, 0.6)
+        else
+          cb(false, "WebRequest error: " .. tostring(req.error))
+        end
+        return
+      end
+
+      local code = tonumber(req.response_code) or 0
+
+      if code == 429 then
+        if attempt < MAX_RETRY then
+          local backoff = 1.5 * attempt
+          _nextTime = os.clock() + backoff
+          schedule(function() queueRequest(url, cb, attempt + 1) end, backoff)
+        else
+          cb(false, "HTTP 429 Too Many Requests")
+        end
+        return
+      end
+
+      if code >= 500 and code <= 599 then
+        if attempt < MAX_RETRY then
+          local backoff = 0.75 * attempt
+          _nextTime = os.clock() + backoff
+          schedule(function() queueRequest(url, cb, attempt + 1) end, backoff)
+        else
+          cb(false, "HTTP " .. tostring(code))
+        end
+        return
+      end
+
+      if code ~= 200 then
+        cb(false, "HTTP " .. tostring(code) .. (req.text and (": " .. req.text) or ""))
+        return
+      end
+
+      cb(true, req.text)
+    end)
+  end, delay)
+end
+
+---------------------------------------------------
+-- Utility
+---------------------------------------------------
+function URLencode(str)
+  if not str then return "" end
+  str = tostring(str)
+  str = str:gsub("\n", "\r\n")
+  str = str:gsub("([^%w %-%_%.%~])", function(c)
+    return string.format("%%%02X", string.byte(c))
+  end)
+  str = str:gsub(" ", "%%20")
+  return str
+end
+
+local function trim(s)
+  return tostring(s or ""):gsub("^%s+",""):gsub("%s+$","")
+end
+
+local function hasText(s)
+  return trim(s) ~= ""
+end
+
+local function quoteIfNeeded(s)
+  s = trim(s)
+  if s == "" then return "" end
+  if s:find("%s") then
+    s = '"' .. s:gsub('"', "") .. '"'
+  end
+  return s
+end
+
+local function formatNumericFilter(input)
+  input = trim(input)
+  if input == "" then return "" end
+  if input:match("^[<>!=]=?") or input:match("^=") then return input end
+  return "=" .. input
+end
+
+-- sanitize set code (no spaces, lowercase, alnum only)
+local function sanitizeSetCode(s)
+  s = trim(s):lower()
+  if s == "" then return "" end
+  s = s:gsub("%s+", "")
+  s = s:gsub("[^%w]", "")
+  return s
+end
+
+---------------------------------------------------
+-- UI helpers: Set status line
+---------------------------------------------------
+local function setSetStatus(text, colorHex)
+  if self.UI.getAttribute("setStatus", "text") ~= nil then
+    self.UI.setAttribute("setStatus", "text", text or "")
+  end
+  if colorHex and self.UI.getAttribute("setStatus", "color") ~= nil then
+    self.UI.setAttribute("setStatus", "color", colorHex)
+  end
+end
+
+---------------------------------------------------
+-- Set validator (calls /sets/<code>)
+---------------------------------------------------
+local function validateSetCode()
+  if not helperState.tags.set.enabled then
+    setSetStatus("", "#CFCFCF")
+    return
+  end
+
+  local sc = sanitizeSetCode(helperState.tags.set.text)
+  if sc == "" then
+    setSetStatus("Set: (enter a set code)", "#CFCFCF")
+    return
+  end
+
+  setSetStatus("Validating set code: " .. sc .. " ...", "#CFCFCF")
+
+  local url = SCRY_BASE .. "/sets/" .. sc
+  queueRequest(url, function(ok, body)
+    if not ok then
+      setSetStatus("Invalid set code: " .. sc, "#FF6666")
+      return
+    end
+
+    local data = nil
+    local okDecode = pcall(function() data = JSON.decode(body) end)
+    if (not okDecode) or (not data) or data.object == "error" then
+      setSetStatus("Invalid set code: " .. sc, "#FF6666")
+      return
+    end
+
+    local name = tostring(data.name or "Unknown Set")
+    local code = tostring(data.code or sc):upper()
+
+    setSetStatus("Set OK: " .. code .. " — " .. name, "#66FF99")
+  end)
+end
+
+---------------------------------------------------
+-- Build Scryfall query (keeps baseline restrictions)
+---------------------------------------------------
+local function buildQueryString()
+  local baseRestrict = "game:paper -is:digital -is:funny -t:basic -border:silver"
+
+  local order = {"White","Blue","Black","Red","Green"}
+  local map = {White="w",Blue="u",Black="b",Red="r",Green="g"}
+
+  local sel = {}
+  for _, color in ipairs(order) do
+    for id, on in pairs(helperState.selectedColors) do
+      local actual = id:match("_(%w+)$") or id
+      if actual == color and on then
+        table.insert(sel, map[color])
+        break
+      end
+    end
+  end
+
+  local q = baseRestrict
+
+  if #sel == 1 then
+    q = q .. " id<=" .. sel[1]
+  elseif #sel > 1 then
+    q = q .. " id<=" .. table.concat(sel, "")
+  end
+
+  if helperState.tags.t.enabled then
+    if hasText(helperState.tags.t.text1) then q = q .. " t:" .. quoteIfNeeded(helperState.tags.t.text1) end
+    if hasText(helperState.tags.t.text2) then q = q .. " t:" .. quoteIfNeeded(helperState.tags.t.text2) end
+  end
+
+  if helperState.tags.kw.enabled then
+    if hasText(helperState.tags.kw.text1) then q = q .. " kw:" .. quoteIfNeeded(helperState.tags.kw.text1) end
+    if hasText(helperState.tags.kw.text2) then q = q .. " kw:" .. quoteIfNeeded(helperState.tags.kw.text2) end
+  end
+
+  if helperState.tags.o.enabled and hasText(helperState.tags.o.text) then
+    q = q .. " o:" .. quoteIfNeeded(helperState.tags.o.text)
+  end
+  if helperState.tags.otag.enabled and hasText(helperState.tags.otag.text) then
+    q = q .. " otag:" .. quoteIfNeeded(helperState.tags.otag.text)
+  end
+  if helperState.tags["is"].enabled and hasText(helperState.tags["is"].text) then
+    q = q .. " is:" .. quoteIfNeeded(helperState.tags["is"].text)
+  end
+  if helperState.tags.set.enabled and hasText(helperState.tags.set.text) then
+    local sc = sanitizeSetCode(helperState.tags.set.text)
+    if sc ~= "" then
+      q = q .. " set:" .. sc
+    end
+  end
+  if helperState.tags.r.enabled and hasText(helperState.tags.r.text) then
+    q = q .. " r:" .. quoteIfNeeded(helperState.tags.r.text)
+  end
+
+  if helperState.tags.cmc.enabled and hasText(helperState.tags.cmc.text) then
+    q = q .. " cmc" .. formatNumericFilter(helperState.tags.cmc.text)
+  end
+  if helperState.tags.pow.enabled and hasText(helperState.tags.pow.text) then
+    q = q .. " pow" .. formatNumericFilter(helperState.tags.pow.text)
+  end
+  if helperState.tags.tou.enabled and hasText(helperState.tags.tou.text) then
+    q = q .. " tou" .. formatNumericFilter(helperState.tags.tou.text)
+  end
+
+  return q
+end
+
+---------------------------------------------------
+-- Preview refresh
+---------------------------------------------------
+local function refreshQueryPreview()
+  local q = buildQueryString()
+
+  if self.UI.getAttribute("queryPreview", "text") ~= nil then
+    self.UI.setAttribute("queryPreview", "text", "Current Query: " .. q)
+  end
+
+  if self.UI.getAttribute("queryPreviewCmd", "text") ~= nil then
+    self.UI.setAttribute("queryPreviewCmd", "text", "scryfall random ?q=" .. URLencode(q))
+  end
+end
+
+---------------------------------------------------
+-- Quantity helpers
+---------------------------------------------------
+local function clampQty(n)
+  n = tonumber(n) or 1
+  if n < 1 then n = 1 end
+  if n > 15 then n = 15 end
+  return n
+end
+
+local function setQtyLabel(qty)
+  if self.UI.getAttribute("qtyLabel", "text") ~= nil then
+    self.UI.setAttribute("qtyLabel", "text", "Number of cards: " .. tostring(qty))
+  end
+end
+
+local function setExclusiveQty(selectedId)
+  for i=1,15 do
+    local tid = "qty_"..tostring(i)
+    local isSel = (tid == selectedId)
+    self.UI.setAttribute(tid, "isOn", tostring(isSel))
+    self.UI.setAttribute(tid, "icon", isSel and "ui_checkon" or "ui_checkoff")
+  end
+end
+
+---------------------------------------------------
+-- Reset Helper (button)
+---------------------------------------------------
+local function resetHelperState()
+  helperState.isSpawning = false
+
+  helperState.selectedColors = {}
+  helperState.cardQuantity = 14
+
+  helperState.tags.t.enabled = false;  helperState.tags.t.text1 = "";  helperState.tags.t.text2 = ""
+  helperState.tags.kw.enabled = false; helperState.tags.kw.text1 = ""; helperState.tags.kw.text2 = ""
+  helperState.tags.o.enabled = false;  helperState.tags.o.text = ""
+  helperState.tags.otag.enabled = false; helperState.tags.otag.text = ""
+  helperState.tags["is"].enabled = false; helperState.tags["is"].text = ""
+  helperState.tags.set.enabled = false; helperState.tags.set.text = ""
+  helperState.tags.r.enabled = false; helperState.tags.r.text = ""
+  helperState.tags.cmc.enabled = false; helperState.tags.cmc.text = ""
+  helperState.tags.pow.enabled = false; helperState.tags.pow.text = ""
+  helperState.tags.tou.enabled = false; helperState.tags.tou.enabled = false; helperState.tags.tou.text = ""
+
+  local toggleIds = {
+    "tag_t_toggle","tag_kw_toggle","tag_o_toggle","tag_otag_toggle",
+    "tag_is_toggle","tag_set_toggle","tag_r_toggle","tag_cmc_toggle","tag_pow_toggle","tag_tou_toggle"
+  }
+  for _, tid in ipairs(toggleIds) do
+    if self.UI.getAttribute(tid, "isOn") ~= nil then
+      self.UI.setAttribute(tid, "isOn", "False")
+      self.UI.setAttribute(tid, "icon", "ui_checkoff")
+    end
+  end
+
+  local textIds = {
+    "tag_t_text1","tag_t_text2","tag_kw_text1","tag_kw_text2",
+    "tag_o_text","tag_otag_text","tag_is_text","tag_set_text",
+    "tag_r_text","tag_cmc_text","tag_pow_text","tag_tou_text"
+  }
+  for _, fid in ipairs(textIds) do
+    if self.UI.getAttribute(fid, "text") ~= nil then
+      self.UI.setAttribute(fid, "text", "")
+    end
+  end
+
+  local colorIds = { "helper_White","helper_Blue","helper_Black","helper_Red","helper_Green" }
+  for _, cid in ipairs(colorIds) do
+    if self.UI.getAttribute(cid, "isOn") ~= nil then
+      self.UI.setAttribute(cid, "isOn", "False")
+      self.UI.setAttribute(cid, "icon", "ui_checkoff")
+      self.UI.setAttribute(cid, "colors", "#606060|#606060|#606060|#606060")
+    end
+  end
+
+  setQtyLabel(helperState.cardQuantity)
+  setExclusiveQty("qty_14")
+
+  setSetStatus("", "#CFCFCF")
+  refreshQueryPreview()
+end
+
+function reset_helper(player, value, id)
+  resetHelperState()
+end
+
+---------------------------------------------------
+-- Card JSON -> ObjectData (Naming/Oracle style)
+---------------------------------------------------
+local function dashFix(s)
+  if not s or s == "" then return "" end
+  s = tostring(s)
+  s = s:gsub("—", "--")
+  s = s:gsub("–", "--")
+  s = s:gsub("%?", "--")
+  return s
+end
+
+local function setOracle(c)
+  local n = "\n[b]"
+  if c.power then
+    n = n .. c.power .. "/" .. c.toughness
+  elseif c.loyalty then
+    n = n .. tostring(c.loyalty)
+  else
+    n = false
+  end
+  return (c.oracle_text or "") .. (n and n .. "[/b]" or "")
+end
+
+local function pickFaceUrlFromImageUris(iu)
+  if not iu then return "" end
+  return (iu.normal or iu.small or "")
+end
+
+local function getFaceUrlWithSuffix(cardObj, faceIndex, imagesuffix)
+  local url = ""
+  if cardObj.image_uris then
+    url = pickFaceUrlFromImageUris(cardObj.image_uris)
+  elseif cardObj.card_faces and cardObj.card_faces[faceIndex] and cardObj.card_faces[faceIndex].image_uris then
+    url = pickFaceUrlFromImageUris(cardObj.card_faces[faceIndex].image_uris)
+  end
+  url = tostring(url or ""):gsub("%?.*", "") .. tostring(imagesuffix or "")
+  return url
+end
+
+local function isDFC(cardObj)
+  return (cardObj and cardObj.card_faces and type(cardObj.card_faces) == "table" and #cardObj.card_faces >= 2)
+end
+
+local function getCardDatFromJSON(json, n)
+  local c = JSON.decode(json)
+  if not c or c.object == "error" then
+    if not jsonErrorPrinted then
+      print("Error decoding card JSON or Scryfall error: " .. tostring(c and c.details or "unknown"))
+      jsonErrorPrinted = true
+    end
+    return nil
+  end
+
+  local imagesuffix = ""
+  if c.image_status ~= "highres_scan" then
+    imagesuffix = "?" .. os.date("%x"):gsub("/", "")
+  end
+
+  local function buildNicknameFromCard(cardObj, faceObj)
+    local nm  = (faceObj and faceObj.name) or cardObj.name or ""
+    local tl  = (faceObj and faceObj.type_line) or cardObj.type_line or ""
+    local cmc = cardObj.cmc or 0
+
+    nm = tostring(nm):gsub('"', "")
+    tl = dashFix(tostring(tl):gsub('"', ""))
+
+    return nm .. "\n" .. tl .. " " .. tostring(cmc) .. "CMC"
+  end
+
+  local face1Obj = (c.card_faces and c.card_faces[1]) or nil
+  local cardName = buildNicknameFromCard(c, face1Obj)
+
+  local descObj = face1Obj or c
+
+  local faceURL1 = getFaceUrlWithSuffix(c, 1, imagesuffix)
+  if faceURL1 == "" then return nil end
+
+  local cardDat = {
+    Transform = { posX=0, posY=0, posZ=0, rotX=0, rotY=180, rotZ=0, scaleX=1, scaleY=1, scaleZ=1 },
+    Name = "Card",
+    Nickname = cardName,
+    Description = setOracle(descObj),
+    Memo = c.oracle_id,
+    CardID = n * 100,
+    CustomDeck = {
+      [n] = {
+        FaceURL = faceURL1,
+        BackURL = backURL,
+        NumWidth=1,
+        NumHeight=1,
+        Type=0,
+        BackIsHidden=true,
+        UniqueBack=false
+      }
+    }
+  }
+
+  if USE_STATES_FOR_DFC and isDFC(c) then
+    local faceURL2 = getFaceUrlWithSuffix(c, 2, imagesuffix)
+    if faceURL2 ~= "" then
+      local face2Obj = c.card_faces[2]
+      local state2 = {
+        Transform = { posX=0, posY=0, posZ=0, rotX=0, rotY=180, rotZ=0, scaleX=1, scaleY=1, scaleZ=1 },
+        Name = "Card",
+        Nickname = buildNicknameFromCard(c, face2Obj),
+        Description = setOracle(face2Obj or c),
+        Memo = c.oracle_id,
+        CardID = n * 100,
+        CustomDeck = {
+          [n] = {
+            FaceURL = faceURL2,
+            BackURL = backURL,
+            NumWidth=1,
+            NumHeight=1,
+            Type=0,
+            BackIsHidden=true,
+            UniqueBack=false
+          }
+        }
+      }
+
+      cardDat.States = {
+        ["2"] = state2
+      }
+    end
+  end
+
+  return cardDat
+end
+
+---------------------------------------------------
+-- Spawning
+---------------------------------------------------
+local function spawnCardForHelper()
+  local now = os.time()
+
+  if now < _cooldownUntil then
+    local left = _cooldownUntil - now
+    print("Cooldown: " .. tostring(left) .. "s")
+    return
+  end
+
+  if helperState.isSpawning then return end
+  helperState.isSpawning = true
+  _cooldownUntil = now + COOLDOWN_SECONDS
+  startSafetyTimer()
+
+  jsonErrorPrinted = false
+
+  local deckCounter = 1
+  local total = clampQty(helperState.cardQuantity)
+
+  local queryStr = buildQueryString()
+  local url = SCRY_BASE .. "/cards/random?q=" .. URLencode(queryStr)
+
+  for i = 1, total do
+    Wait.time(function()
+      queueRequest(url, function(ok, body)
+        if ok then
+          local cd = getCardDatFromJSON(body, deckCounter)
+          deckCounter = deckCounter + 1
+          if cd then
+            spawnObjectData({ data = cd, position = self.getPosition() + Vector(0, 2, 0) })
+          end
+        else
+          print("Error fetching card: " .. tostring(body))
+        end
+
+        if i == total then
+          helperState.isSpawning = false
+        end
+      end)
+    end, (i - 1) * 0.10)
+  end
+end
+
+---------------------------------------------------
+-- onLoad
+---------------------------------------------------
+function onLoad()
+  helperState.cardQuantity = clampQty(helperState.cardQuantity)
+  setQtyLabel(helperState.cardQuantity)
+  setExclusiveQty("qty_"..tostring(helperState.cardQuantity))
+
+  self.UI.setAttribute("tag_t_toggle", "isOn", tostring(helperState.tags.t.enabled))
+  self.UI.setAttribute("tag_kw_toggle", "isOn", tostring(helperState.tags.kw.enabled))
+  self.UI.setAttribute("tag_o_toggle", "isOn", tostring(helperState.tags.o.enabled))
+  self.UI.setAttribute("tag_otag_toggle", "isOn", tostring(helperState.tags.otag.enabled))
+  self.UI.setAttribute("tag_is_toggle", "isOn", tostring(helperState.tags["is"].enabled))
+  self.UI.setAttribute("tag_set_toggle", "isOn", tostring(helperState.tags.set.enabled))
+  self.UI.setAttribute("tag_r_toggle", "isOn", tostring(helperState.tags.r.enabled))
+  self.UI.setAttribute("tag_cmc_toggle", "isOn", tostring(helperState.tags.cmc.enabled))
+  self.UI.setAttribute("tag_pow_toggle", "isOn", tostring(helperState.tags.pow.enabled))
+  self.UI.setAttribute("tag_tou_toggle", "isOn", tostring(helperState.tags.tou.enabled))
+
+  Wait.time(function()
+    setSetStatus("", "#CFCFCF")
+    refreshQueryPreview()
+    validateSetCode()
+  end, 0.2)
+end
+
+---------------------------------------------------
+-- UI Callbacks: Colors
+---------------------------------------------------
+function helper_toggleColor(player, value, id)
+  local on = (tostring(value):lower() == "true")
+  helperState.selectedColors[id] = on
+
+  local col = id:match("_(%w+)$") or id
+  local key = col:sub(1,1):upper()..col:sub(2):lower()
+  local cmap = { White="#FFFFFF", Blue="#0000FF", Black="#000000", Red="#FF0000", Green="#008000" }
+  local newCol = on and cmap[key] or "#606060"
+  self.UI.setAttribute(id, "colors", newCol.."|"..newCol.."|"..newCol.."|"..newCol)
+
+  refreshQueryPreview()
+end
+
+---------------------------------------------------
+-- UI Callbacks: Tag toggles
+---------------------------------------------------
+function tag_toggle(player, value, id)
+  local on = (tostring(value):lower() == "true")
+
+  if id == "tag_t_toggle" then helperState.tags.t.enabled = on
+  elseif id == "tag_kw_toggle" then helperState.tags.kw.enabled = on
+  elseif id == "tag_o_toggle" then helperState.tags.o.enabled = on
+  elseif id == "tag_otag_toggle" then helperState.tags.otag.enabled = on
+  elseif id == "tag_is_toggle" then helperState.tags["is"].enabled = on
+  elseif id == "tag_set_toggle" then helperState.tags.set.enabled = on
+  elseif id == "tag_r_toggle" then helperState.tags.r.enabled = on
+  elseif id == "tag_cmc_toggle" then helperState.tags.cmc.enabled = on
+  elseif id == "tag_pow_toggle" then helperState.tags.pow.enabled = on
+  elseif id == "tag_tou_toggle" then helperState.tags.tou.enabled = on
+  end
+
+  refreshQueryPreview()
+
+  if id == "tag_set_toggle" then
+    validateSetCode()
+  end
+end
+
+---------------------------------------------------
+-- UI Callbacks: Tag inputs
+---------------------------------------------------
+function tag_textChanged(player, value, id)
+  if id == "tag_t_text1" then helperState.tags.t.text1 = value
+  elseif id == "tag_t_text2" then helperState.tags.t.text2 = value
+  elseif id == "tag_kw_text1" then helperState.tags.kw.text1 = value
+  elseif id == "tag_kw_text2" then helperState.tags.kw.text2 = value
+  elseif id == "tag_o_text" then helperState.tags.o.text = value
+  elseif id == "tag_otag_text" then helperState.tags.otag.text = value
+  elseif id == "tag_is_text" then helperState.tags["is"].text = value
+  elseif id == "tag_set_text" then helperState.tags.set.text = value
+  elseif id == "tag_r_text" then helperState.tags.r.text = value
+  elseif id == "tag_cmc_text" then helperState.tags.cmc.text = value
+  elseif id == "tag_pow_text" then helperState.tags.pow.text = value
+  elseif id == "tag_tou_text" then helperState.tags.tou.text = value
+  end
+
+  refreshQueryPreview()
+
+  if id == "tag_set_text" then
+    validateSetCode()
+  end
+end
+
+---------------------------------------------------
+-- UI Callbacks: Quantity toggles (1-15)
+---------------------------------------------------
+function qty_toggle(player, value, id)
+  local on = (tostring(value):lower() == "true")
+  if not on then
+    self.UI.setAttribute(id, "isOn", "True")
+    return
+  end
+
+  local n = tonumber(id:match("qty_(%d+)$") or "14") or 14
+  n = clampQty(n)
+
+  helperState.cardQuantity = n
+  setQtyLabel(n)
+  setExclusiveQty(id)
+
+  refreshQueryPreview()
+end
+
+---------------------------------------------------
+-- UI Callbacks: Reset
+---------------------------------------------------
+function helper_reset(player, value, id)
+  resetHelperState()
+end
+
+---------------------------------------------------
+-- UI Callbacks: Spawn
+---------------------------------------------------
+function helper_spawn(player, value, id)
+  spawnCardForHelper()
+end
