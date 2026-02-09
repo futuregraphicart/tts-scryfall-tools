@@ -1,0 +1,436 @@
+-- Token Puller + Cleanup (loose singles in bag)
+-- Pull: pulls loose matches from bag "MTG Tokens"
+-- Cleanup: returns pile near spawn back into bag as LOOSE singles (never as a Deck)
+-- Robust: if pile merges into a Deck, cleanup peels it by repeatedly re-finding the deck each peel (no stale deck refs)
+
+------------------------------------------------------------
+-- CONFIG
+------------------------------------------------------------
+TOKEN_BAG_NAME = "MTG Tokens"
+SEARCH_RADIUS  = 10.0
+MATCH_MODE     = "contains"   -- "contains" or "exact"
+
+-- spawn pile (below checker, centered)
+SPAWN_OFFSET_LOCAL = { x = 0.0, y = 0.2, z = -7.0 }
+
+-- pull visuals
+Y_LIFT_PER_CARD = 0.06
+Z_FAN_PER_CARD  = 0.03
+TAKE_DELAY      = 0.02
+
+-- cleanup scoop
+CLEANUP_RADIUS       = 3.5
+CLEANUP_MAX_SINGLES  = 2000
+CLEANUP_DELAY        = 0.01
+
+-- physics cast tuning
+CAST_START_Y_ABOVE   = 2.0
+CAST_DISTANCE_DOWN   = 5.0
+
+-- unpack timing
+UNPACK_WAIT_FRAMES   = 90
+PUT_DELAY            = 0.05
+UNPACK_CARD_DELAY    = 0.01
+
+-- final sweep to catch last card after merge/split settles
+FINAL_SWEEPS         = 3
+FINAL_SWEEP_DELAY    = 0.12
+
+------------------------------------------------------------
+-- STATE
+------------------------------------------------------------
+local busy = false
+local stackCount = 0
+local lastQuery = ""
+local spawnPos, spawnRot = nil, nil
+
+------------------------------------------------------------
+-- Safe helpers
+------------------------------------------------------------
+local function safe(fn)
+  local ok, res = pcall(fn)
+  return ok, res
+end
+
+local function safeTag(o)
+  local ok, v = safe(function() return o.tag end)
+  return ok and v or nil
+end
+
+local function safeGUID(o)
+  local ok, v = safe(function() return o.getGUID() end)
+  return ok and v or nil
+end
+
+local function waitSeconds(sec)
+  local t = os.clock()
+  while os.clock() - t < sec do coroutine.yield(0) end
+end
+
+local function dist(a, b)
+  local dx, dy, dz = a.x-b.x, a.y-b.y, a.z-b.z
+  return math.sqrt(dx*dx + dy*dy + dz*dz)
+end
+
+------------------------------------------------------------
+-- UI callbacks
+------------------------------------------------------------
+function onLoad()
+  setStatus("")
+end
+
+function ui_onQueryChanged(player, value, id) lastQuery = value or "" end
+function ui_onQueryEdit(player, value, id)    lastQuery = value or "" end
+
+function ui_onPullClick(player, value, id)
+  if busy then setStatus("Busy…") return end
+
+  local raw = (self.UI.getValue("tokenQuery") or lastQuery or "")
+  local q = normalize(raw)
+  if q == "" then setStatus("Type a token name first.") return end
+
+  local bag = findTokenBag()
+  if not bag then setStatus("No bag named '" .. TOKEN_BAG_NAME .. "' nearby.") return end
+
+  busy = true
+  stackCount = 0
+  spawnPos, spawnRot = computeSpawnTransform()
+
+  setStatus("Searching '" .. q .. "'…")
+  startLuaCoroutine(self, "co_pullTokens")
+end
+
+function ui_onCleanupClick(player, value, id)
+  if busy then setStatus("Busy…") return end
+
+  local bag = findTokenBag()
+  if not bag then setStatus("No bag named '" .. TOKEN_BAG_NAME .. "' nearby.") return end
+
+  busy = true
+  spawnPos, spawnRot = computeSpawnTransform()
+
+  setStatus("Cleanup…")
+  startLuaCoroutine(self, "co_cleanupSingles")
+end
+
+------------------------------------------------------------
+-- General helpers
+------------------------------------------------------------
+function setStatus(msg)
+  if self.UI then self.UI.setAttribute("status", "text", msg or "") end
+end
+
+function normalize(s)
+  if not s then return "" end
+  s = tostring(s):lower()
+  s = s:gsub("^%s+", ""):gsub("%s+$", "")
+  return s
+end
+
+function isMatch(nameLower, queryLower)
+  if MATCH_MODE == "exact" then
+    return nameLower == queryLower
+  end
+  return nameLower:find(queryLower, 1, true) ~= nil
+end
+
+------------------------------------------------------------
+-- Find bag by name near checker
+------------------------------------------------------------
+function findTokenBag()
+  local origin = self.getPosition()
+  local best, bestD = nil, 1e9
+
+  for _, obj in ipairs(getAllObjects()) do
+    if obj and safeTag(obj) == "Bag" then
+      local okName, name = safe(function() return obj.getName() end)
+      if okName and name == TOKEN_BAG_NAME then
+        local okPos, p = safe(function() return obj.getPosition() end)
+        if okPos and p then
+          local d = dist(origin, p)
+          if d <= SEARCH_RADIUS and d < bestD then
+            best, bestD = obj, d
+          end
+        end
+      end
+    end
+  end
+  return best
+end
+
+------------------------------------------------------------
+-- Spawn transforms
+------------------------------------------------------------
+function computeSpawnTransform()
+  local baseRot = self.getRotation()
+  local worldAbs = self.positionToWorld(SPAWN_OFFSET_LOCAL)
+  local pos = { x = worldAbs.x, y = worldAbs.y, z = worldAbs.z }
+  local rot = { x = baseRot.x, y = baseRot.y, z = baseRot.z }
+  return pos, rot
+end
+
+function nextMatchTransform()
+  local pos = {
+    x = spawnPos.x,
+    y = spawnPos.y + (stackCount * Y_LIFT_PER_CARD),
+    z = spawnPos.z + (stackCount * Z_FAN_PER_CARD)
+  }
+  local rot = {
+    x = spawnRot.x,
+    y = spawnRot.y + 180, -- rotate 180°
+    z = spawnRot.z
+  }
+  return pos, rot
+end
+
+------------------------------------------------------------
+-- Pull coroutine (bag contains loose singles)
+------------------------------------------------------------
+function co_pullTokens()
+  local queryLower = normalize(self.UI.getValue("tokenQuery") or lastQuery or "")
+  local bag = findTokenBag()
+  if not bag then setStatus("Bag moved? Not found.") busy = false return 1 end
+
+  local okObjs, bagObjs = safe(function() return bag.getObjects() end)
+  if not okObjs or not bagObjs then
+    setStatus("Could not read bag contents.")
+    busy = false
+    return 1
+  end
+
+  local totalFound = 0
+
+  for _, entry in ipairs(bagObjs) do
+    local nameLower = normalize(entry.nickname or "")
+    if isMatch(nameLower, queryLower) then
+      local pos, rot = nextMatchTransform()
+      bag.takeObject({ guid = entry.guid, position = pos, rotation = rot, smooth = false })
+      stackCount = stackCount + 1
+      totalFound = totalFound + 1
+      waitSeconds(TAKE_DELAY)
+    end
+  end
+
+  setStatus(totalFound == 0 and ("No matches for '" .. queryLower .. "'.")
+                      or ("Pulled " .. totalFound .. " token(s) for '" .. queryLower .. "'."))
+
+  busy = false
+  return 1
+end
+
+------------------------------------------------------------
+-- Cleanup helpers (physics scoop)
+------------------------------------------------------------
+local function scoopNearPile()
+  local origin = { x = spawnPos.x, y = spawnPos.y + CAST_START_Y_ABOVE, z = spawnPos.z }
+
+  local hits = Physics.cast({
+    origin       = origin,
+    direction    = {0, -1, 0},
+    type         = 3,                     -- Sphere
+    size         = {CLEANUP_RADIUS, 0, 0},-- radius
+    max_distance = CAST_DISTANCE_DOWN,
+    debug        = false
+  })
+
+  local seen = {}
+  local out = {}
+
+  for _, h in ipairs(hits) do
+    local o = h.hit_object
+    local g = o and safeGUID(o)
+    if o and g and not seen[g] then
+      seen[g] = true
+      table.insert(out, o)
+    end
+  end
+
+  return out
+end
+
+local function findDeckNearPile()
+  local objs = scoopNearPile()
+  local best = nil
+  local bestD = 1e9
+
+  for _, o in ipairs(objs) do
+    if safeTag(o) == "Deck" then
+      local okP, p = safe(function() return o.getPosition() end)
+      if okP and p then
+        local d = dist(p, spawnPos)
+        if d < bestD then
+          best = o
+          bestD = d
+        end
+      end
+    end
+  end
+
+  return best
+end
+
+local function putSingle(bag, card)
+  if not bag or not card then return false end
+  if safeTag(card) ~= "Card" then return false end
+  waitSeconds(PUT_DELAY)
+  local ok = safe(function() bag.putObject(card) end)
+  return ok
+end
+
+local function peelOneFromDeck(deck, pos, rot)
+  local pulled = nil
+  safe(function()
+    deck.takeObject({
+      position = pos,
+      rotation = rot,
+      smooth = false,
+      callback_function = function(o) pulled = o end
+    })
+  end)
+
+  local guard = 0
+  while (not pulled) and guard < UNPACK_WAIT_FRAMES do
+    guard = guard + 1
+    coroutine.yield(0)
+  end
+
+  return pulled
+end
+
+------------------------------------------------------------
+-- Cleanup coroutine (singles-only, stable unpack)
+------------------------------------------------------------
+function co_cleanupSingles()
+  local bag = findTokenBag()
+  if not bag then setStatus("Bag moved? Not found.") busy = false return 1 end
+
+  local returned = 0
+  local budget = CLEANUP_MAX_SINGLES
+
+  -- Step 1: return any loose Cards immediately
+  local objs = scoopNearPile()
+  for _, o in ipairs(objs) do
+    if budget <= 0 then break end
+    if safeTag(o) == "Card" then
+      if putSingle(bag, o) then
+        returned = returned + 1
+        budget = budget - 1
+      end
+      waitSeconds(CLEANUP_DELAY)
+    end
+  end
+
+  -- Step 2: If a Deck exists, peel it by re-finding the deck each time (prevents stale userdata crash)
+  setStatus("Cleanup: unpacking…")
+  local okBPos, bpos = safe(function() return bag.getPosition() end)
+  local aboveBag = okBPos and {x=bpos.x, y=bpos.y+2.5, z=bpos.z}
+                         or {x=spawnPos.x, y=spawnPos.y+2.5, z=spawnPos.z}
+
+  while budget > 0 do
+    local deck = findDeckNearPile()
+    if not deck then
+      break
+    end
+
+    -- Peel one card; DO NOT keep using this deck reference afterward
+    local pulled = peelOneFromDeck(deck, aboveBag, spawnRot)
+    if not pulled then
+      break
+    end
+
+    if safeTag(pulled) == "Card" then
+      if putSingle(bag, pulled) then
+        returned = returned + 1
+        budget = budget - 1
+      end
+      waitSeconds(UNPACK_CARD_DELAY)
+    else
+      break
+    end
+
+    coroutine.yield(0)
+  end
+
+  -- Step 3: FINAL SWEEPS to catch last card(s) after merge/split settles
+  for i = 1, FINAL_SWEEPS do
+    if budget <= 0 then break end
+    waitSeconds(FINAL_SWEEP_DELAY)
+
+    local sweep = scoopNearPile()
+    for _, o in ipairs(sweep) do
+      if budget <= 0 then break end
+      if safeTag(o) == "Card" then
+        if putSingle(bag, o) then
+          returned = returned + 1
+          budget = budget - 1
+        end
+        waitSeconds(CLEANUP_DELAY)
+      end
+    end
+  end
+
+  setStatus("Cleanup done (returned " .. returned .. " single(s)).")
+  busy = false
+  return 1
+end
+
+
+
+
+
+
+
+
+
+
+<Panel id="root"
+       width="280"
+       height="360"
+       position="0 -280 -28"
+       rotation="0 0 0"
+       color="#000000CC">
+
+  <VerticalLayout padding="12" spacing="10">
+
+    <Text id="title"
+          text="MTG TOKEN FINDER"
+          fontSize="22"
+          color="#FFFFFF"
+          alignment="MiddleCenter" />
+
+    <InputField id="tokenQuery"
+        onValueChanged="ui_onQueryChanged"
+        onEndEdit="ui_onQueryEdit"
+        text=""
+        lineType="SingleLine"
+        characterValidation="None"
+        fontSize="22"
+        height="60"
+        color="#2A2A2AFF"
+        textColor="#FFFFFFFF"
+        placeholder="Token name"
+        placeholderColor="#B0B0B0FF"
+        alignment="Center" />
+
+    <Button id="btnPull"
+        onClick="ui_onPullClick"
+        text="PULL"
+        fontSize="24"
+        height="60"
+        colors="#DDDDDD|#FFFFFF|#AAAAAA|#666666" />
+
+    <Button id="btnCleanup"
+        onClick="ui_onCleanupClick"
+        text="CLEANUP"
+        fontSize="24"
+        height="60"
+        colors="#DDDDDD|#FFFFFF|#AAAAAA|#666666" />
+
+    <Text id="status"
+          text=""
+          fontSize="14"
+          color="#FFFFFF"
+          alignment="MiddleCenter" />
+
+  </VerticalLayout>
+</Panel>
